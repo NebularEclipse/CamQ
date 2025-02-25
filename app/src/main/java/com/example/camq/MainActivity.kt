@@ -3,8 +3,11 @@ package com.example.camq
 import android.Manifest
 import android.content.ContentValues
 import android.content.pm.PackageManager
+import android.health.connect.datatypes.ExerciseRoute
+import android.location.Location
 //import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import android.provider.MediaStore
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.ImageCapture
@@ -24,6 +27,13 @@ import androidx.camera.core.CameraSelector
 import android.util.Log
 //import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCaptureException
+import androidx.core.app.ActivityCompat
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 //import androidx.camera.core.ImageProxy
 //import androidx.camera.video.FallbackStrategy
 //import androidx.camera.video.MediaStoreOutputOptions
@@ -39,6 +49,7 @@ import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
     private lateinit var viewBinding: ActivityMainBinding
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
 
     private var imageCapture: ImageCapture? = null
 
@@ -46,6 +57,9 @@ class MainActivity : AppCompatActivity() {
 //    private var recording: Recording? = null
 
     private lateinit var cameraExecutor: ExecutorService
+
+    private var location: Location? = null
+    private var locationCallback: LocationCallback? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,20 +73,61 @@ class MainActivity : AppCompatActivity() {
             requestPermissions()
         }
 
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+
         // Set up the listeners for take photo and video capture buttons
-        viewBinding.imageCaptureButton.setOnClickListener { takePhoto() }
+        viewBinding.imageCaptureButton.setOnClickListener { requestCurrentLocationAndTakePhoto() }
 //        viewBinding.videoCaptureButton.setOnClickListener { captureVideo() }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
     }
 
-    private fun takePhoto() {
+    private fun requestCurrentLocationAndTakePhoto() {
+        if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED &&
+            ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10000)
+            .setWaitForAccurateLocation(false)
+            .setMinUpdateIntervalMillis(5000)
+            .setMaxUpdateDelayMillis(1000)
+            .build()
+
+        locationCallback = object : LocationCallback() {
+            override fun onLocationResult(locationResult: LocationResult) {
+                locationResult.lastLocation?.let { location ->
+                    takePhoto(location)
+                    locationCallback?.let {
+                        fusedLocationClient.removeLocationUpdates(it)
+                    }
+                }
+            }
+        }
+
+        locationCallback?.let {
+            fusedLocationClient.requestLocationUpdates(locationRequest, it, Looper.getMainLooper())
+        }
+    }
+
+    private fun takePhoto(location: Location) {
         // Get a stable reference of the modifiable image capture use case
         val imageCapture = imageCapture ?: return
 
         // Create time stamped name and MediaStore entry.
-        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US)
-            .format(System.currentTimeMillis())
+        val name = run {
+            val latitude = location.latitude
+            val longitude = location.longitude
+            "IMG_${latitude}_${longitude}_${SimpleDateFormat(FILENAME_FORMAT, Locale.US)
+                .format(System.currentTimeMillis())}"
+        }
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
@@ -164,6 +219,8 @@ class MainActivity : AppCompatActivity() {
             mutableListOf (
                 Manifest.permission.CAMERA,
 //                Manifest.permission.RECORD_AUDIO
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION
             ).apply {
             }.toTypedArray()
     }
