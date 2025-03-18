@@ -2,19 +2,19 @@ package com.example.camq
 
 import android.Manifest
 import android.content.ContentValues
+import android.content.Context
 import android.content.pm.PackageManager
-import android.health.connect.datatypes.ExerciseRoute
-import android.location.Location
-//import android.os.Build
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Bundle
-import android.os.Looper
 import android.provider.MediaStore
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.ImageCapture
-//import androidx.camera.video.Recorder
-//import androidx.camera.video.Recording
-//import androidx.camera.video.VideoCapture
-//import androidx.core.app.ActivityCompat
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
 import androidx.core.content.ContextCompat
 import com.example.camq.databinding.ActivityMainBinding
 import java.util.concurrent.ExecutorService
@@ -25,41 +25,49 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.core.Preview
 import androidx.camera.core.CameraSelector
 import android.util.Log
-//import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCaptureException
-import androidx.core.app.ActivityCompat
-import com.google.android.gms.location.FusedLocationProviderClient
-import com.google.android.gms.location.LocationCallback
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.LocationResult
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
-//import androidx.camera.core.ImageProxy
-//import androidx.camera.video.FallbackStrategy
-//import androidx.camera.video.MediaStoreOutputOptions
-//import androidx.camera.video.Quality
-//import androidx.camera.video.QualitySelector
-//import androidx.camera.video.VideoRecordEvent
-//import androidx.core.content.PermissionChecker
-//import java.nio.ByteBuffer
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.VideoRecordEvent
+import androidx.core.content.PermissionChecker
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-//typealias LumaListener = (luma: Double) -> Unit
+class MainActivity : AppCompatActivity(), SensorEventListener {
+    private val activityResultLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions())
+        { permissions ->
+            // Handle Permission granted/rejected
+            var permissionGranted = true
+            permissions.entries.forEach {
+                if (it.key in REQUIRED_PERMISSIONS && !it.value)
+                    permissionGranted = false
+            }
+            if (!permissionGranted) {
+                Toast.makeText(baseContext,
+                    "Permission request denied",
+                    Toast.LENGTH_SHORT).show()
+            } else {
+                startCamera()
+            }
+        }
 
-class MainActivity : AppCompatActivity() {
     private lateinit var viewBinding: ActivityMainBinding
-    private lateinit var fusedLocationClient: FusedLocationProviderClient
 
     private var imageCapture: ImageCapture? = null
 
-//    private var videoCapture: VideoCapture<Recorder>? = null
-//    private var recording: Recording? = null
+    private var videoCapture: VideoCapture<Recorder>? = null
+    private var recording: Recording? = null
 
     private lateinit var cameraExecutor: ExecutorService
 
-    private var location: Location? = null
-    private var locationCallback: LocationCallback? = null
+    // Rotation Vector?
+    private lateinit var sensorManager: SensorManager
+    private var rotationVectorSensor: Sensor? = null
+    private var rotationVector: FloatArray? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,61 +81,77 @@ class MainActivity : AppCompatActivity() {
             requestPermissions()
         }
 
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        // Init sensor manager and rotation vector sensor
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
         // Set up the listeners for take photo and video capture buttons
-        viewBinding.imageCaptureButton.setOnClickListener { requestCurrentLocationAndTakePhoto() }
-//        viewBinding.videoCaptureButton.setOnClickListener { captureVideo() }
+        viewBinding.imageCaptureButton.setOnClickListener { takePhoto() }
+        viewBinding.videoCaptureButton.setOnClickListener { captureVideo() }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
     }
 
-    private fun requestCurrentLocationAndTakePhoto() {
-        if (ActivityCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED &&
-            ActivityCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            return
-        }
-
-        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10000)
-            .setWaitForAccurateLocation(false)
-            .setMinUpdateIntervalMillis(5000)
-            .setMaxUpdateDelayMillis(1000)
-            .build()
-
-        locationCallback = object : LocationCallback() {
-            override fun onLocationResult(locationResult: LocationResult) {
-                locationResult.lastLocation?.let { location ->
-                    takePhoto(location)
-                    locationCallback?.let {
-                        fusedLocationClient.removeLocationUpdates(it)
-                    }
-                }
-            }
-        }
-
-        locationCallback?.let {
-            fusedLocationClient.requestLocationUpdates(locationRequest, it, Looper.getMainLooper())
+    override fun onResume() {
+        super.onResume()
+        // Register sensor listener when activity is in foreground
+        rotationVectorSensor?.also { sensor ->
+            sensorManager.registerListener(this, sensor,
+                SensorManager.SENSOR_DELAY_NORMAL)
         }
     }
 
-    private fun takePhoto(location: Location) {
+    override fun onPause() {
+        super.onPause()
+        // Unregister sensor listener when activity is in background
+        sensorManager.unregisterListener(this)
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        if (event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
+            rotationVector = event.values.clone()
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        if (sensor?.type == Sensor.TYPE_ROTATION_VECTOR) {
+            when (accuracy) {
+                SensorManager.SENSOR_STATUS_UNRELIABLE -> {
+                    Log.w(TAG, "Rotation vector sensor accuracy: Unreliable")
+                    // Inform the user or disable features
+                }
+                SensorManager.SENSOR_STATUS_ACCURACY_LOW -> {
+                    Log.w(TAG, "Rotation vector sensor accuracy: Low")
+                    // Inform the user or adjust app behavior
+                }
+                SensorManager.SENSOR_STATUS_ACCURACY_MEDIUM -> {
+                    Log.i(TAG, "Rotation vector sensor accuracy: Medium")
+                    // Normal operation
+                }
+                SensorManager.SENSOR_STATUS_ACCURACY_HIGH -> {
+                    Log.i(TAG, "Rotation vector sensor accuracy: High")
+                    // Normal operation
+                }
+                SensorManager.SENSOR_STATUS_NO_CONTACT -> {
+                    Log.i(TAG, "Rotation vector sensor accuracy: Unknown")
+                    // Normal operation
+                }
+            }
+        }
+    }
+
+    private fun takePhoto() {
         // Get a stable reference of the modifiable image capture use case
         val imageCapture = imageCapture ?: return
 
+        val timeStamp = SimpleDateFormat(FILENAME_FORMAT, Locale.US)
+            .format(System.currentTimeMillis())
+
+        val rotationString = rotationVector?.joinToString(separator = "_", prefix = "_rotation_") ?: ""
+
         // Create time stamped name and MediaStore entry.
-        val name = run {
-            val latitude = location.latitude
-            val longitude = location.longitude
-            "IMG_${latitude}_${longitude}_${SimpleDateFormat(FILENAME_FORMAT, Locale.US)
-                .format(System.currentTimeMillis())}"
-        }
+        val name = "${timeStamp}${rotationString}"
+
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
@@ -161,7 +185,71 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-//    private fun captureVideo() {}
+    private fun captureVideo() {
+        val videoCapture = this.videoCapture ?: return
+
+        viewBinding.videoCaptureButton.isEnabled = false
+
+        val curRecording = recording
+        if (curRecording != null) {
+            // Stop the current recording session.
+            curRecording.stop()
+            recording = null
+            return
+        }
+
+        // create and start a new recording session
+        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US)
+            .format(System.currentTimeMillis())
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/CamQ-Video")
+        }
+
+        val mediaStoreOutputOptions = MediaStoreOutputOptions
+            .Builder(contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+            .setContentValues(contentValues)
+            .build()
+        recording = videoCapture.output
+            .prepareRecording(this, mediaStoreOutputOptions)
+            .apply {
+                if (PermissionChecker.checkSelfPermission(this@MainActivity,
+                        Manifest.permission.RECORD_AUDIO) ==
+                    PermissionChecker.PERMISSION_GRANTED)
+                {
+                    withAudioEnabled()
+                }
+            }
+            .start(ContextCompat.getMainExecutor(this)) { recordEvent ->
+                when(recordEvent) {
+                    is VideoRecordEvent.Start -> {
+                        viewBinding.videoCaptureButton.apply {
+//                            text = getString(R.string.stop_capture)
+                            isEnabled = true
+                        }
+                    }
+                    is VideoRecordEvent.Finalize -> {
+                        if (!recordEvent.hasError()) {
+                            val msg = "Video capture succeeded: " +
+                                    "${recordEvent.outputResults.outputUri}"
+                            Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT)
+                                .show()
+                            Log.d(TAG, msg)
+                        } else {
+                            recording?.close()
+                            recording = null
+                            Log.e(TAG, "Video capture ends with error: " +
+                                    "${recordEvent.error}")
+                        }
+                        viewBinding.videoCaptureButton.apply {
+//                            text = getString(R.string.start_capture)
+                            isEnabled = true
+                        }
+                    }
+                }
+            }
+    }
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
@@ -177,8 +265,14 @@ class MainActivity : AppCompatActivity() {
                     it.surfaceProvider = viewBinding.viewFinder.surfaceProvider
                 }
 
-            imageCapture = ImageCapture.Builder()
+            val recorder = Recorder.Builder()
+                .setQualitySelector(QualitySelector.from(Quality.HIGHEST,
+                    FallbackStrategy.higherQualityOrLowerThan(Quality.SD)))
                 .build()
+
+            videoCapture = VideoCapture.withOutput(recorder)
+
+            imageCapture = ImageCapture.Builder().build()
 
             // Select back camera as a default
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
@@ -189,7 +283,7 @@ class MainActivity : AppCompatActivity() {
 
                 // Bind use cases to camera
                 cameraProvider.bindToLifecycle(
-                    this, cameraSelector, preview, imageCapture)
+                    this, cameraSelector, preview, imageCapture, videoCapture)
 
             } catch(exc: Exception) {
                 Log.e(TAG, "Use case binding failed", exc)
@@ -218,29 +312,10 @@ class MainActivity : AppCompatActivity() {
         private val REQUIRED_PERMISSIONS =
             mutableListOf (
                 Manifest.permission.CAMERA,
-//                Manifest.permission.RECORD_AUDIO
+                Manifest.permission.RECORD_AUDIO,
                 Manifest.permission.ACCESS_COARSE_LOCATION,
                 Manifest.permission.ACCESS_FINE_LOCATION
             ).apply {
             }.toTypedArray()
     }
-
-    private val activityResultLauncher =
-        registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions())
-        { permissions ->
-            // Handle Permission granted/rejected
-            var permissionGranted = true
-            permissions.entries.forEach {
-                if (it.key in REQUIRED_PERMISSIONS && !it.value)
-                    permissionGranted = false
-            }
-            if (!permissionGranted) {
-                Toast.makeText(baseContext,
-                    "Permission request denied",
-                    Toast.LENGTH_SHORT).show()
-            } else {
-                startCamera()
-            }
-        }
 }
